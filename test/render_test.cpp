@@ -49,164 +49,26 @@
 
 #include <png.h>
 
+#include "test_common.h"
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
 
+using imnodes_test::kImageHeight;
+using imnodes_test::kImageWidth;
+using imnodes_test::build_node_graph;
+using imnodes_test::save_framebuffer_png;
+using imnodes_test::seed_initial_node_positions;
+
 namespace
 {
-
-// Target image dimensions. Kept modest so PNGs are quick to write and easy to
-// eyeball in a terminal image viewer.
-constexpr int kImageWidth  = 1024;
-constexpr int kImageHeight = 640;
-
-// Number of frames to pump before reading pixels. See file header comment.
+// Number of frames to pump before reading pixels. imnodes resolves node /
+// pin geometry lazily, so the first frame's link routes are stale. Two is
+// usually enough; four for headroom.
 constexpr int kWarmupFrames = 4;
-
-// Build a small node graph: two source nodes feeding one sink. This exercises
-// node title bars, input/output pins, and link rendering between them. The
-// editor window is sized to fill the current display so it tracks live window
-// resizes in interactive mode.
-void build_node_graph()
-{
-    ImGui::SetNextWindowPos(ImVec2(0, 0));
-    ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
-    ImGui::Begin(
-        "render_test",
-        nullptr,
-        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-            ImGuiWindowFlags_NoBringToFrontOnFocus);
-
-    ImNodes::BeginNodeEditor();
-
-    // Node 1: source A
-    ImNodes::BeginNode(1);
-    ImNodes::BeginNodeTitleBar();
-    ImGui::TextUnformatted("source A");
-    ImNodes::EndNodeTitleBar();
-    ImNodes::BeginOutputAttribute(11);
-    ImGui::Indent(60);
-    ImGui::Text("out");
-    ImNodes::EndOutputAttribute();
-    ImNodes::EndNode();
-
-    // Node 2: source B
-    ImNodes::BeginNode(2);
-    ImNodes::BeginNodeTitleBar();
-    ImGui::TextUnformatted("source B");
-    ImNodes::EndNodeTitleBar();
-    ImNodes::BeginOutputAttribute(21);
-    ImGui::Indent(60);
-    ImGui::Text("out");
-    ImNodes::EndOutputAttribute();
-    ImNodes::EndNode();
-
-    // Node 3: sink (two inputs)
-    ImNodes::BeginNode(3);
-    ImNodes::BeginNodeTitleBar();
-    ImGui::TextUnformatted("sink");
-    ImNodes::EndNodeTitleBar();
-    ImNodes::BeginInputAttribute(31);
-    ImGui::Text("a");
-    ImNodes::EndInputAttribute();
-    ImNodes::BeginInputAttribute(32);
-    ImGui::Text("b");
-    ImNodes::EndInputAttribute();
-    ImNodes::BeginOutputAttribute(33);
-    ImGui::Indent(60);
-    ImGui::Text("result");
-    ImNodes::EndOutputAttribute();
-    ImNodes::EndNode();
-
-    // Links: A.out -> sink.a, B.out -> sink.b
-    ImNodes::Link(100, 11, 31);
-    ImNodes::Link(101, 21, 32);
-
-    ImNodes::EndNodeEditor();
-    ImGui::End();
-}
-
-// Write an RGBA8 buffer to a PNG file using libpng. Returns true on success.
-// `pixels` is a tightly packed RGBA buffer in OpenGL's bottom-up row order;
-// PNG expects top-down, so we hand libpng row pointers in reverse order
-// rather than copying the buffer.
-bool write_png_rgba(
-    const char* path, const unsigned char* pixels, int width, int height)
-{
-    FILE* fp = std::fopen(path, "wb");
-    if (!fp)
-    {
-        std::fprintf(stderr, "fopen('%s') failed\n", path);
-        return false;
-    }
-    png_structp png =
-        png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
-    if (!png)
-    {
-        std::fclose(fp);
-        return false;
-    }
-    png_infop info = png_create_info_struct(png);
-    if (!info)
-    {
-        png_destroy_write_struct(&png, nullptr);
-        std::fclose(fp);
-        return false;
-    }
-    if (setjmp(png_jmpbuf(png)))
-    {
-        png_destroy_write_struct(&png, &info);
-        std::fclose(fp);
-        return false;
-    }
-    png_init_io(png, fp);
-    png_set_IHDR(
-        png,
-        info,
-        (png_uint_32)width,
-        (png_uint_32)height,
-        8,
-        PNG_COLOR_TYPE_RGBA,
-        PNG_INTERLACE_NONE,
-        PNG_COMPRESSION_TYPE_DEFAULT,
-        PNG_FILTER_TYPE_DEFAULT);
-
-    std::vector<png_bytep> rows((size_t)height);
-    const size_t stride = (size_t)width * 4;
-    for (int y = 0; y < height; ++y)
-    {
-        // Flip vertically: PNG row y comes from GL row (height - 1 - y).
-        rows[(size_t)y] =
-            const_cast<png_bytep>(pixels + (size_t)(height - 1 - y) * stride);
-    }
-    png_set_rows(png, info, rows.data());
-    png_write_png(png, info, PNG_TRANSFORM_IDENTITY, nullptr);
-    png_destroy_write_struct(&png, &info);
-    std::fclose(fp);
-    return true;
-}
-
 } // namespace
-
-// Read pixels from the currently bound framebuffer and write them as a PNG.
-// Used by both the headless mode (FBO) and interactive snapshot key (default
-// framebuffer of a visible window).
-bool save_snapshot(const char* path, int width, int height)
-{
-    std::vector<unsigned char> pixels((size_t)width * height * 4);
-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-    if (!write_png_rgba(path, pixels.data(), width, height))
-    {
-        std::fprintf(stderr, "write_png failed: %s\n", path);
-        return false;
-    }
-    std::printf("wrote %s (%dx%d)\n", path, width, height);
-    return true;
-}
 
 int main(int argc, char** argv)
 {
@@ -313,9 +175,7 @@ int main(int argc, char** argv)
 
     // Initial node positions, in editor (grid) space. Must happen after the
     // imnodes context is created.
-    ImNodes::SetNodeGridSpacePos(1, ImVec2(60.f, 100.f));
-    ImNodes::SetNodeGridSpacePos(2, ImVec2(60.f, 260.f));
-    ImNodes::SetNodeGridSpacePos(3, ImVec2(480.f, 180.f));
+    seed_initial_node_positions();
 
     // The clear color matches example/main.cpp (a muted slate) so that visual
     // diffs against screenshots of the existing interactive examples are
@@ -362,7 +222,7 @@ int main(int argc, char** argv)
                     {
                         int w = 0, h = 0;
                         SDL_GL_GetDrawableSize(window, &w, &h);
-                        save_snapshot(out_path, w, h);
+                        save_framebuffer_png(out_path, w, h);
                     }
                 }
             }
@@ -380,7 +240,7 @@ int main(int argc, char** argv)
             render_one_frame(fbo, kImageWidth, kImageHeight);
 
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-        if (!save_snapshot(out_path, kImageWidth, kImageHeight))
+        if (!save_framebuffer_png(out_path, kImageWidth, kImageHeight))
             return 1;
     }
 
