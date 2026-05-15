@@ -1,10 +1,16 @@
-// Headless render test for imnodes.
+// Render test for imnodes.
 //
-// Renders a small node graph to an offscreen framebuffer and saves it as a PNG.
-// Intended for agents to iterate on imnodes changes and inspect the visual
-// result directly, without needing an interactive window.
+// Renders a small node graph either headlessly (saved as a PNG) or in an
+// interactive SDL window. Intended for agents to iterate on imnodes changes
+// and inspect the visual result directly, without needing a display when
+// running headlessly.
 //
-// Usage: render_test [output.png]
+// Usage:
+//   render_test [output.png]       # headless: render and write PNG, then exit
+//   render_test -i | --interactive # show a window, run an event loop
+//                                  # press 's' to save a snapshot PNG,
+//                                  # 'q' or Esc to quit
+//
 // Default output path: imnodes_test.png in the current working directory.
 //
 // Implementation notes:
@@ -45,6 +51,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 namespace
@@ -59,11 +66,13 @@ constexpr int kImageHeight = 640;
 constexpr int kWarmupFrames = 4;
 
 // Build a small node graph: two source nodes feeding one sink. This exercises
-// node title bars, input/output pins, and link rendering between them.
+// node title bars, input/output pins, and link rendering between them. The
+// editor window is sized to fill the current display so it tracks live window
+// resizes in interactive mode.
 void build_node_graph()
 {
     ImGui::SetNextWindowPos(ImVec2(0, 0));
-    ImGui::SetNextWindowSize(ImVec2((float)kImageWidth, (float)kImageHeight));
+    ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
     ImGui::Begin(
         "render_test",
         nullptr,
@@ -182,9 +191,37 @@ bool write_png_rgba(
 
 } // namespace
 
+// Read pixels from the currently bound framebuffer and write them as a PNG.
+// Used by both the headless mode (FBO) and interactive snapshot key (default
+// framebuffer of a visible window).
+bool save_snapshot(const char* path, int width, int height)
+{
+    std::vector<unsigned char> pixels((size_t)width * height * 4);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    if (!write_png_rgba(path, pixels.data(), width, height))
+    {
+        std::fprintf(stderr, "write_png failed: %s\n", path);
+        return false;
+    }
+    std::printf("wrote %s (%dx%d)\n", path, width, height);
+    return true;
+}
+
 int main(int argc, char** argv)
 {
-    const char* out_path = (argc > 1) ? argv[1] : "imnodes_test.png";
+    // Argument parsing. Interactive mode takes precedence; in headless mode the
+    // first positional arg overrides the default PNG path.
+    bool interactive = false;
+    const char* out_path = "imnodes_test.png";
+    for (int i = 1; i < argc; ++i)
+    {
+        const char* a = argv[i];
+        if (std::strcmp(a, "-i") == 0 || std::strcmp(a, "--interactive") == 0)
+            interactive = true;
+        else if (a[0] != '-')
+            out_path = a;
+    }
 
     if (SDL_Init(SDL_INIT_VIDEO) != 0)
     {
@@ -201,13 +238,18 @@ int main(int argc, char** argv)
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
+    Uint32 window_flags = SDL_WINDOW_OPENGL;
+    if (interactive)
+        window_flags |= SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+    else
+        window_flags |= SDL_WINDOW_HIDDEN;
     SDL_Window* window = SDL_CreateWindow(
         "imnodes_render_test",
         SDL_WINDOWPOS_UNDEFINED,
         SDL_WINDOWPOS_UNDEFINED,
         kImageWidth,
         kImageHeight,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
+        window_flags);
     if (!window)
     {
         std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
@@ -224,32 +266,30 @@ int main(int argc, char** argv)
         return 1;
     }
     SDL_GL_MakeCurrent(window, gl_ctx);
+    SDL_GL_SetSwapInterval(interactive ? 1 : 0);
 
-    // Offscreen render target. We render into this FBO and read back from it,
-    // so the visible state of the (hidden) window is irrelevant.
+    // Headless mode renders into an FBO so the (hidden) default framebuffer's
+    // presentation state doesn't matter. Interactive mode renders straight to
+    // the visible default framebuffer.
     GLuint fbo = 0, color_tex = 0;
-    glGenFramebuffers(1, &fbo);
-    glGenTextures(1, &color_tex);
-    glBindTexture(GL_TEXTURE_2D, color_tex);
-    glTexImage2D(
-        GL_TEXTURE_2D,
-        0,
-        GL_RGBA8,
-        kImageWidth,
-        kImageHeight,
-        0,
-        GL_RGBA,
-        GL_UNSIGNED_BYTE,
-        nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    glFramebufferTexture2D(
-        GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_tex, 0);
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+    if (!interactive)
     {
-        std::fprintf(stderr, "FBO incomplete\n");
-        return 1;
+        glGenFramebuffers(1, &fbo);
+        glGenTextures(1, &color_tex);
+        glBindTexture(GL_TEXTURE_2D, color_tex);
+        glTexImage2D(
+            GL_TEXTURE_2D, 0, GL_RGBA8, kImageWidth, kImageHeight, 0, GL_RGBA,
+            GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glFramebufferTexture2D(
+            GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_tex, 0);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        {
+            std::fprintf(stderr, "FBO incomplete\n");
+            return 1;
+        }
     }
 
     IMGUI_CHECKVERSION();
@@ -259,56 +299,90 @@ int main(int argc, char** argv)
     ImNodes::StyleColorsDark();
 
     ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize    = ImVec2((float)kImageWidth, (float)kImageHeight);
-    io.DeltaTime      = 1.0f / 60.0f;
-    // The SDL2 backend would normally set this from the window event loop;
-    // since we are not pumping events we disable any feature that depends on
-    // dynamic mouse capture / cursor management.
-    io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
+    if (!interactive)
+    {
+        // Headless: no event loop, so we must seed display size and dt before
+        // the first NewFrame, and disable any IO that depends on cursor state.
+        io.DisplaySize = ImVec2((float)kImageWidth, (float)kImageHeight);
+        io.DeltaTime   = 1.0f / 60.0f;
+        io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
+    }
 
     ImGui_ImplSDL2_InitForOpenGL(window, gl_ctx);
     ImGui_ImplOpenGL3_Init(glsl_version);
 
-    // Position the nodes in editor (grid) space. This must happen after the
-    // imnodes context is created. Coordinates are in editor space, which is
-    // independent of the editor window's panning state at frame zero.
+    // Initial node positions, in editor (grid) space. Must happen after the
+    // imnodes context is created.
     ImNodes::SetNodeGridSpacePos(1, ImVec2(60.f, 100.f));
     ImNodes::SetNodeGridSpacePos(2, ImVec2(60.f, 260.f));
     ImNodes::SetNodeGridSpacePos(3, ImVec2(480.f, 180.f));
 
-    for (int frame = 0; frame < kWarmupFrames; ++frame)
-    {
+    // The clear color matches example/main.cpp (a muted slate) so that visual
+    // diffs against screenshots of the existing interactive examples are
+    // meaningful.
+    const ImVec4 clear_color(0.45f, 0.55f, 0.60f, 1.0f);
+
+    auto render_one_frame = [&](GLuint target_fbo, int vp_w, int vp_h) {
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
-
         build_node_graph();
-
         ImGui::Render();
-
-        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-        glViewport(0, 0, kImageWidth, kImageHeight);
-        // Match the clear color of the existing examples (a muted slate) so
-        // visual diffs against screenshots of the interactive examples are
-        // meaningful.
-        glClearColor(0.45f * 1.0f, 0.55f * 1.0f, 0.60f * 1.0f, 1.0f);
+        glBindFramebuffer(GL_FRAMEBUFFER, target_fbo);
+        glViewport(0, 0, vp_w, vp_h);
+        glClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-    }
+    };
 
-    // Read back the final frame.
-    std::vector<unsigned char> pixels(kImageWidth * kImageHeight * 4);
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glReadPixels(
-        0, 0, kImageWidth, kImageHeight, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-
-    if (!write_png_rgba(out_path, pixels.data(), kImageWidth, kImageHeight))
+    if (interactive)
     {
-        std::fprintf(stderr, "write_png_rgba failed for '%s'\n", out_path);
-        return 1;
+        std::printf(
+            "interactive mode: drag nodes; 's' = save PNG (%s); 'q' or Esc = quit\n",
+            out_path);
+        bool done = false;
+        while (!done)
+        {
+            SDL_Event event;
+            while (SDL_PollEvent(&event))
+            {
+                ImGui_ImplSDL2_ProcessEvent(&event);
+                if (event.type == SDL_QUIT)
+                    done = true;
+                if (event.type == SDL_WINDOWEVENT
+                    && event.window.event == SDL_WINDOWEVENT_CLOSE
+                    && event.window.windowID == SDL_GetWindowID(window))
+                    done = true;
+                if (event.type == SDL_KEYDOWN)
+                {
+                    SDL_Keycode k = event.key.keysym.sym;
+                    if (k == SDLK_ESCAPE || k == SDLK_q)
+                        done = true;
+                    else if (k == SDLK_s)
+                    {
+                        int w = 0, h = 0;
+                        SDL_GL_GetDrawableSize(window, &w, &h);
+                        save_snapshot(out_path, w, h);
+                    }
+                }
+            }
+            int draw_w = 0, draw_h = 0;
+            SDL_GL_GetDrawableSize(window, &draw_w, &draw_h);
+            render_one_frame(0, draw_w, draw_h);
+            SDL_GL_SwapWindow(window);
+        }
     }
-    std::printf("wrote %s (%dx%d)\n", out_path, kImageWidth, kImageHeight);
+    else
+    {
+        // Headless: pump a few frames to let imnodes resolve pin positions and
+        // link geometry, then read pixels from the FBO and save.
+        for (int frame = 0; frame < kWarmupFrames; ++frame)
+            render_one_frame(fbo, kImageWidth, kImageHeight);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        if (!save_snapshot(out_path, kImageWidth, kImageHeight))
+            return 1;
+    }
 
     // Cleanup
     ImGui_ImplOpenGL3_Shutdown();
@@ -316,8 +390,11 @@ int main(int argc, char** argv)
     ImNodes::DestroyContext();
     ImGui::DestroyContext();
 
-    glDeleteFramebuffers(1, &fbo);
-    glDeleteTextures(1, &color_tex);
+    if (!interactive)
+    {
+        glDeleteFramebuffers(1, &fbo);
+        glDeleteTextures(1, &color_tex);
+    }
     SDL_GL_DeleteContext(gl_ctx);
     SDL_DestroyWindow(window);
     SDL_Quit();
