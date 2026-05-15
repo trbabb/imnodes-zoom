@@ -1,0 +1,55 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "Default (Release, vcpkg, system imgui)",
+      "description": "Release build using the bundled vcpkg toolchain (SDL2) and Dear ImGui / imgui_test_engine from /usr/local. Override IMGUI_DIR / IMGUI_TEST_ENGINE_DIR if those live elsewhere on your machine.",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "debug",
+      "displayName": "Debug",
+      "inherits": "default",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "default",
+      "configurePreset": "default",
+      "jobs": 0
+    },
+    {
+      "name": "debug",
+      "configurePreset": "debug",
+      "jobs": 0
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "default",
+      "configurePreset": "default",
+      "output": { "outputOnFailure": true },
+      "execution": { "stopOnFailure": false }
+    }
+  ],
+  "workflowPresets": [
+    {
+      "name": "default",
+      "description": "Configure + build + run tests in one command.",
+      "steps": [
+        { "type": "configure", "name": "default" },
+        { "type": "build",     "name": "default" },
+        { "type": "test",      "name": "default" }
+      ]
+    }
+  ]
+}

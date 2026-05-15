@@ -1,9 +1,13 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.25)
 
 project(imnodes)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
+
+# CTest entries live in this file so `ctest --preset default` (driven by
+# CMakePresets.json) can run the drag test without extra configuration.
+enable_testing()
 
 
 # determine whether this is a standalone project or included by other projects
@@ -209,5 +213,11 @@ if(IMNODES_EXAMPLES)
         target_link_libraries(node_drag_test PRIVATE
             imnodes SDL2::SDL2 PNG::PNG)
         _imnodes_link_gl(node_drag_test)
+        # The test writes its PNG artifacts to the working directory, so run
+        # it from the build dir to keep the source tree clean.
+        add_test(
+            NAME node_drag_test
+            COMMAND $<TARGET_FILE:node_drag_test>
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     endif()
 endif()
