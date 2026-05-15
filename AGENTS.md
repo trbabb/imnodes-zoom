@@ -18,3 +18,5 @@ Support narrow sanity check tests with stochastic tests that run many trials and
 Document functions with docstrings. Say what the function does, what it is used for, and any invariants on its inputs and outputs. Comment major sections of code explaining the intent. Document corner cases. Clarify tricky logic. We humans have weak memory, and agents' memory gets reset on every session; save us all future cognitive load by writing down your thinking. This also helps expose where intent and code diverge. If you make changes to code, ensure that existing comments are concordant with your changes.
 
 Do not respond with a multiple-choice selector. Present your questions for discussion as ordinary text/markup.
+
+When opening PRs, be sure to open the PR against the FORKED repository, not the original upstream imnodes repository. `gh` commands will default to the latter, so you must specify.
