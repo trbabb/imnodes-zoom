@@ -41,8 +41,7 @@
 #  include <GL/glext.h>
 #endif
 
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "stb_image_write.h"
+#include <png.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -121,20 +120,64 @@ void build_node_graph()
     ImGui::End();
 }
 
-// Flip image rows in-place. OpenGL returns pixels bottom-up; PNG expects top-
-// down. Operates on 4-byte (RGBA) pixels.
-void flip_rows_rgba(unsigned char* pixels, int width, int height)
+// Write an RGBA8 buffer to a PNG file using libpng. Returns true on success.
+// `pixels` is a tightly packed RGBA buffer in OpenGL's bottom-up row order;
+// PNG expects top-down, so we hand libpng row pointers in reverse order
+// rather than copying the buffer.
+bool write_png_rgba(
+    const char* path, const unsigned char* pixels, int width, int height)
 {
-    const int row_bytes = width * 4;
-    std::vector<unsigned char> tmp(row_bytes);
-    for (int y = 0; y < height / 2; ++y)
+    FILE* fp = std::fopen(path, "wb");
+    if (!fp)
     {
-        unsigned char* a = pixels + y * row_bytes;
-        unsigned char* b = pixels + (height - 1 - y) * row_bytes;
-        std::copy(a, a + row_bytes, tmp.begin());
-        std::copy(b, b + row_bytes, a);
-        std::copy(tmp.begin(), tmp.end(), b);
+        std::fprintf(stderr, "fopen('%s') failed\n", path);
+        return false;
     }
+    png_structp png =
+        png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
+    if (!png)
+    {
+        std::fclose(fp);
+        return false;
+    }
+    png_infop info = png_create_info_struct(png);
+    if (!info)
+    {
+        png_destroy_write_struct(&png, nullptr);
+        std::fclose(fp);
+        return false;
+    }
+    if (setjmp(png_jmpbuf(png)))
+    {
+        png_destroy_write_struct(&png, &info);
+        std::fclose(fp);
+        return false;
+    }
+    png_init_io(png, fp);
+    png_set_IHDR(
+        png,
+        info,
+        (png_uint_32)width,
+        (png_uint_32)height,
+        8,
+        PNG_COLOR_TYPE_RGBA,
+        PNG_INTERLACE_NONE,
+        PNG_COMPRESSION_TYPE_DEFAULT,
+        PNG_FILTER_TYPE_DEFAULT);
+
+    std::vector<png_bytep> rows((size_t)height);
+    const size_t stride = (size_t)width * 4;
+    for (int y = 0; y < height; ++y)
+    {
+        // Flip vertically: PNG row y comes from GL row (height - 1 - y).
+        rows[(size_t)y] =
+            const_cast<png_bytep>(pixels + (size_t)(height - 1 - y) * stride);
+    }
+    png_set_rows(png, info, rows.data());
+    png_write_png(png, info, PNG_TRANSFORM_IDENTITY, nullptr);
+    png_destroy_write_struct(&png, &info);
+    std::fclose(fp);
+    return true;
 }
 
 } // namespace
@@ -260,12 +303,9 @@ int main(int argc, char** argv)
     glReadPixels(
         0, 0, kImageWidth, kImageHeight, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
 
-    flip_rows_rgba(pixels.data(), kImageWidth, kImageHeight);
-
-    if (!stbi_write_png(
-            out_path, kImageWidth, kImageHeight, 4, pixels.data(), kImageWidth * 4))
+    if (!write_png_rgba(out_path, pixels.data(), kImageWidth, kImageHeight))
     {
-        std::fprintf(stderr, "stbi_write_png failed for '%s'\n", out_path);
+        std::fprintf(stderr, "write_png_rgba failed for '%s'\n", out_path);
         return 1;
     }
     std::printf("wrote %s (%dx%d)\n", out_path, kImageWidth, kImageHeight);
